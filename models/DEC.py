@@ -8,6 +8,8 @@ Usage:
 
 Author:
     Xifeng Guo. 2017.1.30
+
+Edited by Minh-Nghia Nguyen, April 2018: Added scoring by [distance to centroid times cluster density].
 """
 
 from time import time

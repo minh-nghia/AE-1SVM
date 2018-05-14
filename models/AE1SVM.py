@@ -2,6 +2,7 @@ import numpy as np
 import tensorflow as tf
 from sklearn.utils import shuffle as sk_shuffle
 from sklearn.metrics import roc_auc_score, average_precision_score
+from metrics import metrics
 
 from .CAE import ConvAutoEncoder
 tf.set_random_seed(2018)
@@ -10,7 +11,7 @@ tf.set_random_seed(2018)
 class AEOneClassSVM(object):
 
     def __init__(self, input_tensor, batch_size, name, autoencoder_layers, nu, alpha=1.0, sigma=1.0,
-                 kernel_approx_features=1000, convolutional=False,
+                 kernel_approx_features=1000, convolutional=False, 
                  autoencoder_activation='linear',
                  ae_op=tf.train.AdamOptimizer(1e-2),
                  full_op=tf.train.AdamOptimizer(1e-2), svm_op=tf.train.AdamOptimizer(1e-4), seed=2018):
@@ -23,6 +24,7 @@ class AEOneClassSVM(object):
         self.autoencoder_scope = '{}_autoencoder'.format(self.name)
         self.svm_scope = '{}_svm'.format(self.name)
         self.feature_analyser_scope = '{}_feature_analyser'.format(self.name)
+        self.drop_rate = tf.placeholder_with_default(0.0, shape=())
 
         if autoencoder_activation == 'linear':
             self.autoencoder_activation = lambda x: tf.add(x, 0.0)
@@ -87,14 +89,14 @@ class AEOneClassSVM(object):
                 data = sk_shuffle(train_data, random_state=self.seed)
             for b in range(batches):
                 batch_data = data[b * self.batch_size:(b + 1) * self.batch_size]
-                sess.run([self.full_optimizer, self.loss], feed_dict={input_tensor: batch_data})
+                sess.run([self.full_optimizer, self.loss], feed_dict={input_tensor: batch_data, self.drop_rate: 0.5})
             epoch_loss = sess.run(self.loss, feed_dict={input_tensor: train_data}) / len(train_data)
             epoch_loss_ae = sess.run(self.reconstruction_loss, feed_dict={input_tensor: train_data}) / len(train_data)
             epoch_loss_svm = sess.run(self.svm_loss, feed_dict={input_tensor: train_data}) / len(train_data)
             if verbose:
-                predictions = sess.run(self.output, feed_dict={input_tensor: validation_data})
+                predictions = self.predict(sess, validation_data)
                 print('Epoch:', i + 1, 'Loss:', epoch_loss, '(', epoch_loss_ae, 'x', self.alpha, '+', epoch_loss_svm, ')',
-                      'AUROC:', roc_auc_score(validation_label, predictions),
+                      'AUROC:', roc_auc_score(-validation_label, -predictions),
                       'AUPRC:', average_precision_score(-validation_label, -predictions))
             else:
                 print('.', end='')
@@ -110,12 +112,13 @@ class AEOneClassSVM(object):
             epoch_loss_ae = sess.run(self.reconstruction_loss, feed_dict={input_tensor: train_data}) / len(train_data)
             epoch_loss_svm = sess.run(self.svm_loss, feed_dict={input_tensor: train_data}) / len(train_data)
             if verbose:
-                predictions = sess.run(self.output, feed_dict={input_tensor: validation_data})
+                predictions = self.predict(sess, validation_data)
                 print('Epoch:', i + 1, 'Loss:', epoch_loss, '(', epoch_loss_ae, 'x', self.alpha, '+', epoch_loss_svm, ')',
-                      'AUROC:', roc_auc_score(validation_label, predictions),
+                      'AUROC:', roc_auc_score(-validation_label, -predictions),
                       'AUPRC:', average_precision_score(-validation_label, -predictions))
             else:
                 print('.', end='')
+         
 
     def fit_ae(self, sess, train_data, epochs, input_tensor=None, shuffle=False, verbose=False):
         input_tensor = input_tensor if input_tensor is not None else self.input_tensor
@@ -129,7 +132,7 @@ class AEOneClassSVM(object):
                 data = sk_shuffle(train_data, random_state=self.seed)
             for b in range(batches):
                 batch_data = data[b * self.batch_size:(b + 1) * self.batch_size]
-                sess.run([self.ae_optimizer, self.reconstruction_loss], feed_dict={input_tensor: batch_data})
+                sess.run([self.ae_optimizer, self.reconstruction_loss], feed_dict={input_tensor: batch_data, self.drop_rate: 0.5})
             if verbose:
                 epoch_loss = sess.run(self.reconstruction_loss, feed_dict={input_tensor: train_data}) / len(train_data)
                 print('Epoch:', i + 1, 'Loss:', epoch_loss)
@@ -250,25 +253,24 @@ class AEOneClassSVM(object):
 
     def _create_cae(self):
         with tf.variable_scope(self.autoencoder_scope):
-            drop = 0.5
             x = tf.reshape(self.input_tensor, shape=[-1, 28, 28, 1])
             print(x.shape)
 
             conv1 = tf.layers.conv2d(x, 16, 5, activation=tf.nn.relu, padding='same')
-            conv1 = tf.nn.dropout(conv1, drop)
             print(conv1.shape)
+            conv1 = tf.layers.dropout(conv1, self.drop_rate)
             conv1 = tf.layers.max_pooling2d(conv1, 2, 2)
             print(conv1.shape)
 
             conv2 = tf.layers.conv2d(conv1, 9, 5, activation=tf.nn.relu, padding='same')
-            conv2 = tf.nn.dropout(conv2, drop)
             print(conv2.shape)
+            conv2 = tf.layers.dropout(conv2, self.drop_rate)
             conv2 = tf.layers.max_pooling2d(conv2, 2, 2)
             print(conv2.shape)
 
             flat1 = tf.contrib.layers.flatten(conv2)
-            fc1 = tf.layers.dense(flat1, 49, activation=tf.nn.relu)
-                
+            fc1 = tf.layers.dense(flat1, 49)
+
             fc2 = tf.layers.dense(fc1, 7 * 7 * 9)
             fc2 = tf.reshape(fc2, shape=[-1, 7, 7, 9])
             print(fc2.shape)
@@ -284,17 +286,9 @@ class AEOneClassSVM(object):
             up1 = upsample(dc1, factor=[2, 2])
             
             print(up1.shape)
-            
-            conv0 = tf.layers.conv2d(up1, 1, 5, activation=tf.nn.sigmoid, padding='same')
-            
-            print(conv0.shape)
-            
-            
-            output = tf.contrib.layers.flatten(conv0)
-
-#             flat2 = tf.contrib.layers.flatten(up1)
-#             print(flat2.shape)
-#             output = tf.layers.dense(flat2, 784)
+            flat2 = tf.contrib.layers.flatten(up1)
+            print(flat2.shape)
+            output = tf.layers.dense(flat2, 784)
             
             return fc1, output
         
